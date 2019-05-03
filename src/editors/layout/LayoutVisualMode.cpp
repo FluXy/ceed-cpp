@@ -1,6 +1,7 @@
 #include "src/editors/layout/LayoutVisualMode.h"
 #include "src/editors/layout/LayoutEditor.h"
-#include "src/cegui/CEGUIProjectManager.h"
+#include "src/editors/layout/LayoutUndoCommands.h"
+#include "src/cegui/CEGUIUtils.h"
 #include "src/ui/CEGUIWidget.h"
 #include "src/ui/CEGUIGraphicsView.h"
 #include "src/ui/layout/LayoutScene.h"
@@ -374,19 +375,8 @@ bool LayoutVisualMode::copy()
     QDataStream stream(&bytes, QIODevice::WriteOnly);
     for (LayoutManipulator* manipulator : topMostSelected)
     {
-        // manipulator->getWidget()
-
-        //stream << entry->name();
-        //stream << entry->pos();
-        //...
-
-        /*
-            # we set the visual to None because we can't pickle QWidgets (also it would prevent copying across editors)
-            # we will set it to the correct visual when we will be pasting it back
-            serialisationData = widgethelpers.SerialisationData(self, wdt.widget)
-            serialisationData.setVisual(None)
-            topMostSerialisationData.append(serialisationData)
-        */
+        if (!CEGUIUtils::serializeWidget(*manipulator->getWidget(), stream, true))
+            return false;
     }
 
     if (!bytes.size()) return false;
@@ -419,24 +409,8 @@ bool LayoutVisualMode::paste()
 
     if (!target) return false;
 
-    scene->clearSelection();
+    _editor.getUndoStack()->push(new LayoutPasteCommand(*this, target->getWidgetPath(), std::move(bytes)));
 
-    //???copy bytes to PasteCommand? how to handle what widgets are created by the command?
-    QDataStream stream(&bytes, QIODevice::ReadOnly);
-    while (!stream.atEnd())
-    {
-        // deserialize widget from stream
-        // create manipulators for this widget recursively with target as parent
-        // make topmost manipulators selected: manipulator.setSelected(True)
-    }
-
-/*
-        for serialisationData in topMostSerialisationData:
-            serialisationData.setVisual(self)
-
-        cmd = undo.PasteCommand(self, topMostSerialisationData, target.widget.getNamePath())
-        self.tabbedEditor.undoStack.push(cmd)
-*/
     return true;
 }
 

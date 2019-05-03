@@ -1,78 +1,154 @@
 #include "src/editors/layout/LayoutUndoCommands.h"
+#include "src/editors/layout/LayoutVisualMode.h"
+#include "src/ui/layout/LayoutScene.h"
+#include "src/ui/layout/LayoutManipulator.h"
+#include "src/ui/layout/WidgetHierarchyDockWidget.h"
+#include "src/cegui/CEGUIUtils.h"
+#include <CEGUI/Window.h>
 
-LayoutUndoCommands::LayoutUndoCommands()
+LayoutMoveCommand::LayoutMoveCommand(LayoutVisualMode& visualMode, std::vector<Record>&& imageRecords)
+    : _visualMode(visualMode)
+    , _records(std::move(imageRecords))
 {
-
+    if (_records.size() == 1)
+        setText(QString("Move '%1'").arg(_records[0].path));
+    else
+        setText(QString("Move %1 widgets'").arg(_records.size()));
 }
 
+void LayoutMoveCommand::undo()
+{
+    QUndoCommand::undo();
+
+    for (const auto& rec : _records)
+    {
+        auto manipulator = _visualMode.getScene()->getManipulatorByPath(rec.path);
+        assert(manipulator);
+        manipulator->getWidget()->setPosition(rec.oldPos);
+        manipulator->updateFromWidget(false, true);
+
+        // In case the pixel position didn't change but the absolute and negative components changed and canceled each other out
+        manipulator->update();
+
+        /*
+            widgetManipulator.triggerPropertyManagerCallback({"Position", "Area"})
+        */
+    }
+}
+
+void LayoutMoveCommand::redo()
+{
+    for (const auto& rec : _records)
+    {
+        auto manipulator = _visualMode.getScene()->getManipulatorByPath(rec.path);
+        assert(manipulator);
+        manipulator->getWidget()->setPosition(rec.newPos);
+        manipulator->updateFromWidget(false, true);
+
+        // In case the pixel position didn't change but the absolute and negative components changed and canceled each other out
+        manipulator->update();
+
+        /*
+            widgetManipulator.triggerPropertyManagerCallback({"Position", "Area"})
+        */
+    }
+
+    QUndoCommand::redo();
+}
+
+bool LayoutMoveCommand::mergeWith(const QUndoCommand* other)
+{
+    const LayoutMoveCommand* otherCmd = dynamic_cast<const LayoutMoveCommand*>(other);
+    if (!otherCmd) return false;
+
+    // It is nearly impossible to do the delta guesswork right, the parent might get resized etc,
+    // it might be possible in this exact scenario (no resizes) but in the generic one it's a pain
+    // and can't be done consistently, so I don't even try and just merge if the paths match
+
+    if (_records.size() != otherCmd->_records.size()) return false;
+
+    QStringList pathes;
+    for (const auto& rec : _records)
+        pathes.push_back(rec.path);
+
+    for (const auto& rec : otherCmd->_records)
+        if (!pathes.contains(rec.path)) return false;
+
+    // The same set of widgets, can merge
+
+    for (auto& rec : _records)
+    {
+        const QString& path = rec.path;
+        auto it = std::find_if(otherCmd->_records.begin(), otherCmd->_records.end(), [&path](const Record& otherRec)
+        {
+            return otherRec.path == path;
+        });
+        assert(it != otherCmd->_records.end());
+
+        rec.newPos = it->newPos;
+    }
+
+    return true;
+}
+
+//---------------------------------------------------------------------
+
+LayoutPasteCommand::LayoutPasteCommand(LayoutVisualMode& visualMode,
+                                       const QString& targetPath,
+                                       QByteArray&& data)
+    : _visualMode(visualMode)
+    , _targetPath(targetPath)
+    , _data(std::move(data))
+{
+}
+
+void LayoutPasteCommand::undo()
+{
+    QUndoCommand::undo();
+
+    LayoutScene* scene = _visualMode.getScene();
+    for (const QString& path : _createdWidgets)
+        scene->getManipulatorByPath(path)->detach();
+
+    _visualMode.getHierarchyDockWidget()->refresh();
+
+    _createdWidgets.clear();
+}
+
+void LayoutPasteCommand::redo()
+{
+    LayoutScene* scene = _visualMode.getScene();
+    auto target = scene->getManipulatorByPath(_targetPath);
+    if (!target) return;
+
+    scene->clearSelection();
+
+    QDataStream stream(&_data, QIODevice::ReadOnly);
+    while (!stream.atEnd())
+    {
+        CEGUI::Window* widget = CEGUIUtils::deserializeWidget(stream, target->getWidget());
+        LayoutManipulator* manipulator = target->createChildManipulator(widget);
+        manipulator->setSelected(true);
+        _createdWidgets.push_back(manipulator->getWidgetPath());
+    }
+
+    // Update the topmost parent widget recursively to get possible resize or
+    // repositions of the pasted widgets into the manipulator data.
+    target->updateFromWidget(true, true);
+
+    _visualMode.getHierarchyDockWidget()->refresh();
+
+    if (_createdWidgets.size() == 1)
+        setText(QString("Paste '%1' hierarchy to '%2'").arg(_createdWidgets[0]).arg(_targetPath));
+    else
+        setText(QString("Paste %1 hierarchies to '%2'").arg(_createdWidgets.size()).arg(_targetPath));
+
+    QUndoCommand::redo();
+}
+
+//---------------------------------------------------------------------
+
 /*
-idbase = 1200
-
-
-class MoveCommand(commands.UndoCommand):
-    """This command simply moves given widgets from old positions to new
-    """
-
-    def __init__(self, visual, widgetPaths, oldPositions, newPositions):
-        super(MoveCommand, self).__init__()
-
-        self.visual = visual
-
-        self.widgetPaths = widgetPaths
-        self.oldPositions = oldPositions
-        self.newPositions = newPositions
-
-        self.refreshText()
-
-    def refreshText(self):
-        if len(self.widgetPaths) == 1:
-            self.setText("Move '%s'" % (self.widgetPaths[0]))
-        else:
-            self.setText("Move %i widgets" % (len(self.widgetPaths)))
-
-    def id(self):
-        return idbase + 1
-
-    def mergeWith(self, cmd):
-        if self.widgetPaths == cmd.widgetPaths:
-            # it is nearly impossible to do the delta guesswork right, the parent might get resized
-            # etc, it might be possible in this exact scenario (no resizes) but in the generic
-            # one it's a pain and can't be done consistently, so I don't even try and just merge if
-            # the paths match
-            self.newPositions = cmd.newPositions
-
-            return True
-
-            #for widgetPath in self.widgetPaths:
-            #    delta = self.newPositions[widgetPath] - self.oldPositions[widgetPath]
-
-        return False
-
-    def undo(self):
-        super(MoveCommand, self).undo()
-
-        for widgetPath in self.widgetPaths:
-            widgetManipulator = self.visual.scene.getManipulatorByPath(widgetPath)
-            widgetManipulator.widget.setPosition(self.oldPositions[widgetPath])
-            widgetManipulator.updateFromWidget(False, True)
-            # in case the pixel position didn't change but the absolute and negative components changed and canceled each other out
-            widgetManipulator.update()
-
-            widgetManipulator.triggerPropertyManagerCallback({"Position", "Area"})
-
-    def redo(self):
-        for widgetPath in self.widgetPaths:
-            widgetManipulator = self.visual.scene.getManipulatorByPath(widgetPath)
-            widgetManipulator.widget.setPosition(self.newPositions[widgetPath])
-            widgetManipulator.updateFromWidget(False, True)
-            # in case the pixel position didn't change but the absolute and negative components changed and canceled each other out
-            widgetManipulator.update()
-
-            widgetManipulator.triggerPropertyManagerCallback({"Position", "Area"})
-
-        super(MoveCommand, self).redo()
-
-
 class ResizeCommand(commands.UndoCommand):
     """This command resizes given widgets from old positions and old sizes to new
     """
@@ -595,70 +671,6 @@ class ReparentCommand(commands.UndoCommand):
         self.visual.hierarchyDockWidget.refresh()
         super(ReparentCommand, self).redo()
 
-
-class PasteCommand(commands.UndoCommand):
-    """This command pastes clipboard data to the given widget
-    """
-
-    def __init__(self, visual, clipboardData, targetWidgetPath):
-        super(PasteCommand, self).__init__()
-
-        self.visual = visual
-
-        self.clipboardData = clipboardData
-        self.targetWidgetPath = targetWidgetPath
-
-        self.refreshText()
-
-    def refreshText(self):
-        if len(self.clipboardData) == 1:
-            self.setText("Paste '%s' hierarchy to '%s'" % (self.clipboardData[0].name, self.targetWidgetPath))
-        else:
-            self.setText("Paste %i hierarchies to '%s'" % (len(self.clipboardData), self.targetWidgetPath))
-
-    def id(self):
-        return idbase + 9
-
-    def mergeWith(self, cmd):
-        # we never merge paste commands
-        return False
-
-    def undo(self):
-        super(PasteCommand, self).undo()
-
-        widgetPaths = []
-        for serialisationData in self.clipboardData:
-            widgetPath = serialisationData.parentPath + "/" + serialisationData.name
-            widgetPaths.append(widgetPath)
-
-            manipulator = self.visual.scene.getManipulatorByPath(widgetPath)
-            wasRootWidget = manipulator.widget.getParent() is None
-
-            manipulator.detach(destroyWidget = True)
-
-            if wasRootWidget:
-                # this was a root widget being deleted, handle this accordingly
-                self.visual.setRootWidgetManipulator(None)
-
-        self.visual.hierarchyDockWidget.refresh()
-
-    def redo(self):
-        targetManipulator = self.visual.scene.getManipulatorByPath(self.targetWidgetPath)
-
-        for serialisationData in self.clipboardData:
-            # make sure the name is unique and we will be able to paste smoothly
-            serialisationData.name = targetManipulator.getUniqueChildWidgetName(serialisationData.name)
-            serialisationData.setParentPath(self.targetWidgetPath)
-
-            serialisationData.reconstruct(self.visual.scene.rootManipulator)
-
-        # Update the topmost parent widget recursively to get possible resize or
-        # repositions of the pasted widgets into the manipulator data.
-        targetManipulator.updateFromWidget(True, True)
-
-        self.visual.hierarchyDockWidget.refresh()
-
-        super(PasteCommand, self).redo()
 
 
 class NormaliseSizeCommand(ResizeCommand):
